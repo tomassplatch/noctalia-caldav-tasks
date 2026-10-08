@@ -14,7 +14,8 @@ local tagQuery = ""     -- current text in the tag filter input
 local tagSeed = 0       -- bumped to re-create (clear) the tag input
 local dueSeed = 0       -- bumped to re-create the due-date input
 local dueDraft = nil    -- {href, text}: due-date text typed but not yet submitted
-local RECENT_SECONDS = 30 -- how long a completed task stays visible (struck through)
+local titleDraft = nil  -- {href, text}: title text typed but not yet submitted
+local RECENT_SECONDS = 30 -- how long a completed task stays visible
 local recent = {}         -- href -> { task = <task>, at = <os.time() when completed> }
 local doneRows = {}       -- recently completed tasks, oldest first
 
@@ -191,6 +192,11 @@ local function setDue(ics, dateStr)
 	return edit(ics, { "DUE", "DURATION" }, add)
 end
 
+-- Replace the task's title.
+local function setSummary(ics, text)
+	return edit(ics, { "SUMMARY" }, { "SUMMARY:" .. escapeText(text) })
+end
+
 -- ===== end of iCalendar helpers =====
 
 -- Tick every second only while completed tasks are waiting to expire.
@@ -266,6 +272,11 @@ end
 -- The service does not know the new ETag after our own write, so it is
 -- dropped until the next sync supplies it.
 local function updateTask(t, label, transform, onFail)
+	if t.creating then
+		noctalia.notify(APP, label .. ": the task is still being created — try again in a moment")
+		requestRefresh()
+		return
+	end
 	local u, p = auth()
 	local function failed()
 		if onFail then onFail() end
@@ -342,6 +353,21 @@ local function saveTaskDue(t, dateStr)
 	t.due = dateStr and dateStr:gsub("-", "") or nil
 	render()
 	updateTask(t, "Due date save", function(ics) return setDue(ics, dateStr) end)
+end
+
+-- Optimistically update + persist a task's title.
+local function saveTaskTitle(t, text)
+	t.summary = text
+	render()
+	updateTask(t, "Rename", function(ics) return setSummary(ics, text) end)
+end
+
+-- Title and due date in a single write (two writes would race on the same ETag).
+local function saveTaskTitleAndDue(t, text, dateStr)
+	t.summary = text
+	t.due = dateStr and dateStr:gsub("-", "") or nil
+	render()
+	updateTask(t, "Save", function(ics) return setDue(setSummary(ics, text), dateStr) end)
 end
 
 local function addTagTo(t, tag)
@@ -482,27 +508,57 @@ local function dueInfo(raw)
 	return text, (num < todayNum)
 end
 
--- Validate and save a due-date text ("" clears the date).
--- Returns false (after telling the user) if the format is wrong.
-local function commitDue(t, text)
+-- Parse a due-date text. Returns ok, dateStr (dateStr nil means "clear the date").
+-- Tells the user and returns false if the format is wrong.
+local function parseDue(text)
 	local s = ((text or ""):match("^%s*(.-)%s*$"))
-	if s == "" then
-		saveTaskDue(t, nil)
-		return true
-	end
+	if s == "" then return true, nil end
 	local y, m, d = s:match("^(%d%d%d%d)-(%d%d)-(%d%d)$")
 	if y and tonumber(m) >= 1 and tonumber(m) <= 12 and tonumber(d) >= 1 and tonumber(d) <= 31 then
-		saveTaskDue(t, s)
-		return true
+		return true, s
 	end
 	noctalia.notify(APP, "Format: YYYY-MM-DD (e.g. 2026-10-31)")
-	return false
+	return false, nil
+end
+
+-- Validate and save a due-date text ("" clears the date).
+local function commitDue(t, text)
+	local ok, dateStr = parseDue(text)
+	if not ok then return false end
+	saveTaskDue(t, dateStr)
+	return true
+end
+
+-- Validate and save a title. Unchanged titles are not written.
+local function commitTitle(t, text)
+	local s = ((text or ""):match("^%s*(.-)%s*$"))
+	if s == "" then
+		noctalia.notify(APP, "The title cannot be empty")
+		return false
+	end
+	if s ~= tostring(t.summary) then saveTaskTitle(t, s) end
+	return true
 end
 
 -- The tag editor: filter-and-add input + suggestion chips + removable tags + due date.
 local function tagEditor(t)
 	local children = {}
-
+	-- Title: Enter saves; text typed but not submitted is saved on "Done".
+	children[#children + 1] = ui.row({ gap = 6, align = "center" }, {
+		ui.glyph({ name = "pencil", size = 14, color = "on_surface/0.6" }),
+		ui.input({
+			key = "title-" .. tostring(t.href), value = tostring(t.summary or ""),
+			placeholder = "Task title", controlSize = "sm",
+			flexGrow = 1,
+			onChange = function(text)
+				titleDraft = { href = t.href, text = tostring(text or "") }
+			end,
+			onSubmit = function(val)
+				if commitTitle(t, val) then titleDraft = nil end
+				render()
+			end,
+		}),
+	})
 	-- Current tags: click to remove.
 	local current = t.tags or {}
 	if #current > 0 then
@@ -588,18 +644,41 @@ local function tagEditor(t)
 	children[#children + 1] = ui.button({
 		text = "Done", variant = "ghost",
 		onClick = function()
-			local draft = dueDraft
-			dueDraft = nil
-			if draft and draft.href == t.href and draft.text ~= prefilled then
-				if not commitDue(t, draft.text) then
-					dueDraft = draft -- invalid format: keep the editor open to fix it
+			local tDraft, dDraft = titleDraft, dueDraft
+			titleDraft, dueDraft = nil, nil
+
+			-- what is pending for this task
+			local newTitle, newDue, hasDue = nil, nil, false
+			if tDraft and tDraft.href == t.href then
+				local s = (tDraft.text:match("^%s*(.-)%s*$"))
+				if s == "" then
+					noctalia.notify(APP, "The title cannot be empty")
+					titleDraft, dueDraft = tDraft, dDraft -- keep the editor open to fix it
 					return
 				end
+				if s ~= tostring(t.summary) then newTitle = s end
+			end
+			if dDraft and dDraft.href == t.href and dDraft.text ~= prefilled then
+				local ok, dateStr = parseDue(dDraft.text)
+				if not ok then
+					titleDraft, dueDraft = tDraft, dDraft -- keep the editor open to fix it
+					return
+				end
+				newDue, hasDue = dateStr, true
 				dueSeed = dueSeed + 1
 			end
+
 			editingTask = nil
 			tagQuery = ""
-			render()
+			if newTitle and hasDue then
+				saveTaskTitleAndDue(t, newTitle, newDue)
+			elseif newTitle then
+				saveTaskTitle(t, newTitle)
+			elseif hasDue then
+				saveTaskDue(t, newDue)
+			else
+				render()
+			end
 		end,
 	})
 
@@ -635,6 +714,7 @@ local function taskRow(task)
 			end
 			tagQuery = ""
 			dueDraft = nil
+			titleDraft = nil
 			render()
 		end,
 	})
@@ -652,7 +732,7 @@ local function doneRow(task)
 	return ui.row({
 		key = "done-" .. tostring(task.href or task.summary),
 		gap = 8,
-		align = "center",se
+		align = "center",
 		opacity = 0.45,
 	}, {
 		ui.button({
