@@ -1,0 +1,8 @@
+{
+  "settings.server.label": "Server URL",
+  "settings.username.label": "Username",
+  "settings.password.label": "App password",
+  "settings.calendar.label": "Calendar name",
+  "settings.calendar_url.label": "Calendar URL (optional, skips auto-discovery)",
+  "settings.interval.label": "Poll interval (seconds)"
+}
