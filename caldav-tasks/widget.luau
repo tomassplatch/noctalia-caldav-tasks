@@ -12,9 +12,12 @@ end
 
 local function render()
 	barWidget.setGlyph("check")
-	if noctalia.state.get("status") then
-		barWidget.setText(tostring(openCount()))
-		barWidget.setTooltip(noctalia.state.get("status") .. "\nClick to open the list")
+	local status = noctalia.state.get("status")
+	if status then
+		local s = tostring(status)
+		local failing = not (s:find("^Synced") or s:find("^Syncing"))
+		barWidget.setText(tostring(openCount()) .. (failing and " !" or ""))
+		barWidget.setTooltip(s .. "\nClick to open the list")
 	else
 		barWidget.setText("…")
 	end
