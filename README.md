@@ -1,4 +1,4 @@
-# CalDAV Tasks Sync — a Noctalia plugin
+# CalDAV Tasks Sync - a Noctalia plugin
 
 A to-do panel and bar widget for [Noctalia](https://noctalia.dev) v5 that syncs with a
 CalDAV task calendar. Tested with **Nextcloud Tasks**.
@@ -47,3 +47,6 @@ credentials are only sent to the configured server, and never over a downgrade f
   it in the process list while a sync runs. Use an app password, not your main password.
 - Due dates are date-only; time of day is not editable.
 - Recurring tasks are shown but not specially handled.
+
+## Disclaimer
+- App is completely vibe-coded.
