@@ -22,9 +22,7 @@ local function requestRefresh()
 end
 
 local function report(where, err)
-	local msg = tostring(err)
-	noctalia.notify(APP, "[" .. where .. "] " .. msg)
-	noctalia.notify(APP, "»» " .. msg:sub(-90))
+	noctalia.notify(APP, "[" .. where .. "] " .. tostring(err))
 end
 
 local function auth()
