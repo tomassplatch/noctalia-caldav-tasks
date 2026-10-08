@@ -24,6 +24,7 @@ import xml.etree.ElementTree as ET
 
 DAV = "{DAV:}"
 CALDAV = "{urn:ietf:params:xml:ns:caldav}"
+CS = "{http://calendarserver.org/ns/}"
 TIMEOUT = 30
 MAX_REDIRECTS = 5
 
@@ -39,6 +40,14 @@ FIND_HOME = (
     "<d:current-user-principal/><c:calendar-home-set/>"
     "</d:prop></d:propfind>"
 )
+
+PROP_CTAG = (
+    '<?xml version="1.0"?>'
+    '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:prop>'
+    "<cs:getctag/><d:sync-token/>"
+    "</d:prop></d:propfind>"
+)
+
 REPORT_TODOS = (
     '<?xml version="1.0" encoding="utf-8"?>'
     '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
@@ -290,6 +299,21 @@ def parse_vtodo(ics):
             props.setdefault(m.group(1).upper(), []).append(line.split(":", 1)[1])
     return props
 
+def get_ctag(client, cal_url):
+    """Cheap change marker for the calendar (ctag, else sync-token), or None.
+    Any problem returns None, which just means 'do the full fetch'."""
+    try:
+        text, _ = client.request("PROPFIND", cal_url, PROP_CTAG, depth="0")
+        root = parse_xml(text)
+    except (urllib.error.HTTPError, Fail):
+        return None
+    for resp in root.iter(DAV + "response"):
+        for prop in ok_props(resp):
+            for tag in (CS + "getctag", DAV + "sync-token"):
+                value = prop.findtext(tag)
+                if value and value.strip():
+                    return value.strip()
+    return None
 
 def fetch_tasks(client, cal_url):
     try:
@@ -338,10 +362,11 @@ def fetch_tasks(client, cal_url):
 def main():
     args = sys.argv[1:]
     if len(args) < 4:
-        die("usage: fetch_tasks.py SERVER USER PASSWORD CALENDAR [CALENDAR_URL]")
+        die("usage: fetch_tasks.py SERVER USER PASSWORD CALENDAR [CALENDAR_URL] [PREV_CTAG]")
     server, user, password, calendar = (a.strip() if i != 2 else a
                                         for i, a in enumerate(args[:4]))
     override = args[4].strip() if len(args) > 4 else ""
+    previous = args[5].strip() if len(args) > 5 else ""
     try:
         client = Client(server, user, password)
         if override:
@@ -350,6 +375,12 @@ def main():
             cal_url = choose_calendar(find_calendars(client, user), calendar)["url"]
         if not cal_url.endswith("/"):
             cal_url += "/"
+        # Read the marker BEFORE fetching, so a change landing in between
+        # is picked up by the next sync.
+        ctag = get_ctag(client, cal_url)
+        if ctag and ctag == previous:
+            print(json.dumps({"ok": True, "url": cal_url, "ctag": ctag, "unchanged": True}))
+            return
         tasks = fetch_tasks(client, cal_url)
     except Fail as e:
         die(str(e))
@@ -357,7 +388,10 @@ def main():
         die(f"HTTP {e.code} from the server")
     except Exception as e:  # never leave the plugin without a JSON answer
         die(f"{type(e).__name__}: {e}")
-    print(json.dumps({"ok": True, "url": cal_url, "tasks": tasks}))
+    out = {"ok": True, "url": cal_url, "tasks": tasks}
+    if ctag:
+        out["ctag"] = ctag
+    print(json.dumps(out))
 
 
 if __name__ == "__main__":
