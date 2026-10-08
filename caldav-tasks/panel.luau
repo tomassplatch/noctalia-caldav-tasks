@@ -15,6 +15,7 @@ local editingTask = nil -- the task whose editor is expanded
 local tagQuery = ""     -- current text in the tag filter input
 local tagSeed = 0       -- bumped to re-create (clear) the tag input
 local dueSeed = 0       -- bumped to re-create the due-date input
+local dueDraft = nil    -- {href, text}: due-date text typed but not yet submitted
 
 local render -- forward declaration
 
@@ -392,6 +393,23 @@ local function dueInfo(raw)
 	return text, (num < todayNum)
 end
 
+-- Validate and save a due-date text ("" clears the date).
+-- Returns false (after telling the user) if the format is wrong.
+local function commitDue(t, text)
+	local s = ((text or ""):match("^%s*(.-)%s*$"))
+	if s == "" then
+		saveTaskDue(t, nil)
+		return true
+	end
+	local y, m, d = s:match("^(%d%d%d%d)-(%d%d)-(%d%d)$")
+	if y and tonumber(m) >= 1 and tonumber(m) <= 12 and tonumber(d) >= 1 and tonumber(d) <= 31 then
+		saveTaskDue(t, s)
+		return true
+	end
+	noctalia.notify(APP, "Format: YYYY-MM-DD (e.g. 2026-10-31)")
+	return false
+end
+
 -- The tag editor: filter-and-add input + suggestion chips + removable tags + due date.
 local function tagEditor(t)
 	local children = {}
@@ -453,6 +471,7 @@ local function tagEditor(t)
 	end
 
 	-- Due date editor: prefilled, Enter saves; empty Enter clears.
+	-- Text typed but not submitted is saved when "Done" is clicked.
 	local dy, dm, dd
 	if t.due then
 		dy, dm, dd = tostring(t.due):match("^(%d%d%d%d)(%d%d)(%d%d)")
@@ -464,18 +483,13 @@ local function tagEditor(t)
 			key = "due-" .. tostring(t.href) .. "-" .. dueSeed, value = prefilled,
 			placeholder = "YYYY-MM-DD (empty clears)", controlSize = "sm",
 			flexGrow = 1,
+			-- remember the text only; no render() here, so typing is not disturbed
+			onChange = function(text)
+				dueDraft = { href = t.href, text = tostring(text or "") }
+			end,
 			onSubmit = function(val)
-				local s = ((val or ""):match("^%s*(.-)%s*$"))
-				if s == "" then
-					saveTaskDue(t, nil)
-				else
-					local y, m, d = s:match("^(%d%d%d%d)-(%d%d)-(%d%d)$")
-					if y and tonumber(m) >= 1 and tonumber(m) <= 12 and tonumber(d) >= 1 and tonumber(d) <= 31 then
-						saveTaskDue(t, s)
-					else
-						noctalia.notify(APP, "Format: YYYY-MM-DD (e.g. 2026-10-31)")
-					end
-				end
+				commitDue(t, val)
+				dueDraft = nil
 				dueSeed = dueSeed + 1
 				render()
 			end,
@@ -485,6 +499,15 @@ local function tagEditor(t)
 	children[#children + 1] = ui.button({
 		text = "Done", variant = "ghost",
 		onClick = function()
+			local draft = dueDraft
+			dueDraft = nil
+			if draft and draft.href == t.href and draft.text ~= prefilled then
+				if not commitDue(t, draft.text) then
+					dueDraft = draft -- invalid format: keep the editor open to fix it
+					return
+				end
+				dueSeed = dueSeed + 1
+			end
 			editingTask = nil
 			tagQuery = ""
 			render()
@@ -522,6 +545,7 @@ local function taskRow(task)
 				editingTask = task
 			end
 			tagQuery = ""
+			dueDraft = nil
 			render()
 		end,
 	})
