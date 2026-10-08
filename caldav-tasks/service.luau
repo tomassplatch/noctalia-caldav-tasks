@@ -33,27 +33,56 @@ local function scriptPath()
 	return dir .. "fetch_tasks.py"
 end
 
--- The calendar URL found by the last successful sync is passed back on the
--- next one, so discovery (several requests) only runs once per configuration.
-local known = { key = nil, url = nil }
+local function syncInterval()
+	return math.max(15, tonumber(noctalia.getConfig("interval")) or 120)
+end
+
+-- Back off while syncs keep failing (offline, server down, bad credentials).
+-- Manual refreshes and config changes ignore this.
+local failures = 0
+local retryAt = 0
+
+local function noteSuccess()
+	failures = 0
+	retryAt = 0
+end
+
+local function noteFailure()
+	failures = failures + 1
+	local wait = math.min(1800, syncInterval() * (2 ^ math.min(failures, 5)))
+	retryAt = os.time() + math.floor(wait)
+end
+
+-- The calendar URL and change marker (ctag) from the last successful sync are
+-- passed back on the next one: discovery runs once per configuration, and an
+-- unchanged calendar skips the full download.
+local known = { key = nil, url = nil, ctag = nil, open = 0, total = 0 }
 
 local syncing = false
 local syncStarted = 0
-local pending = false -- a refresh was requested while a sync was running
+local pending = false      -- a refresh was requested while a sync was running
+local pendingForce = false
 
 local runFetch
 
 local function finishSync()
 	syncing = false
 	if pending then
+		local force = pendingForce
 		pending = false
-		runFetch()
+		pendingForce = false
+		runFetch(force)
 	end
 end
 
-runFetch = function()
+-- force = true: always download and republish (manual refresh, config change,
+-- after a panel edit). force = false: timer tick, may skip if unchanged.
+runFetch = function(force)
+	force = force == true
+
 	if syncing and os.time() - syncStarted < 90 then
 		pending = true
+		pendingForce = pendingForce or force
 		return
 	end
 
@@ -75,17 +104,24 @@ runFetch = function()
 	end
 
 	local key = table.concat({ server, user, cal, calUrl }, "\n")
+	if known.key ~= key then known.ctag = nil end
+
 	local urlArg = calUrl
 	if known.key == key and known.url then urlArg = known.url end
 
-	publishStatus("Syncing...")
+	local ctagArg = ""
+	if not force and known.key == key and known.ctag then ctagArg = known.ctag end
+
+	if force then publishStatus("Syncing...") end
 	syncing = true
 	syncStarted = os.time()
 	pending = false
+	pendingForce = false
 
 	local launched = noctalia.runAsync(
-		{ "python3", script, server, user, pass, cal, urlArg },
+		{ "python3", script, server, user, pass, cal, urlArg, ctagArg },
 		function(r)
+			local good = false
 			local ok, err = pcall(function()
 				if type(r) ~= "table" then
 					known.url = nil
@@ -114,6 +150,20 @@ runFetch = function()
 					return
 				end
 
+				local ctag = nil
+				if type(data.ctag) == "string" and data.ctag ~= "" then ctag = data.ctag end
+
+				if data.unchanged then
+					-- Calendar did not change: keep the published tasks as they are.
+					known.key = key
+					known.url = data.url
+					known.ctag = ctag
+					publishStatus(("Synced %s — %d open (%d total)")
+						:format(os.date("%H:%M:%S"), known.open, known.total))
+					good = true
+					return
+				end
+
 				local tasks = data.tasks or {}
 				local open = 0
 				for _, t in ipairs(tasks) do
@@ -122,11 +172,17 @@ runFetch = function()
 
 				known.key = key
 				known.url = data.url
+				known.ctag = ctag
+				known.open = open
+				known.total = #tasks
 				noctalia.state.set("dav", { server = server, calUrl = data.url })
 				publishStatus(("Synced %s — %d open (%d total)")
 					:format(os.date("%H:%M:%S"), open, #tasks))
 				noctalia.state.set("tasks", tasks)
+				good = true
 			end)
+
+			if good then noteSuccess() else noteFailure() end
 
 			if not ok then
 				publishStatus("Sync error: " .. tostring(err))
@@ -143,16 +199,21 @@ runFetch = function()
 end
 
 function onConfigChanged()
-	runFetch()
+	noctalia.setUpdateInterval(syncInterval() * 1000)
+	noteSuccess()
+	runFetch(true)
 end
 
-local interval = tonumber(noctalia.getConfig("interval")) or 120
-noctalia.setUpdateInterval(math.max(15, interval) * 1000)
+noctalia.setUpdateInterval(syncInterval() * 1000)
 
+-- Panel open, refresh button, and every panel edit all go through here:
+-- always a full fetch, so optimistic edits in the panel get corrected.
 noctalia.state.watch("refreshRequest", function()
-	runFetch()
+	runFetch(true)
 end)
 
+-- Timer tick: cheap check, and no retry while backing off.
 function update()
-	runFetch()
+	if os.time() < retryAt then return end
+	runFetch(false)
 end
