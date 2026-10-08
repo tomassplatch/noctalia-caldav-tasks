@@ -40,14 +40,12 @@ FIND_HOME = (
     "<d:current-user-principal/><c:calendar-home-set/>"
     "</d:prop></d:propfind>"
 )
-
 PROP_CTAG = (
     '<?xml version="1.0"?>'
     '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:prop>'
     "<cs:getctag/><d:sync-token/>"
     "</d:prop></d:propfind>"
 )
-
 REPORT_TODOS = (
     '<?xml version="1.0" encoding="utf-8"?>'
     '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
@@ -78,6 +76,8 @@ class Client:
         parts = urllib.parse.urlsplit(server)
         if parts.scheme not in ("http", "https") or not parts.netloc:
             raise Fail("Server URL must start with http:// or https://")
+        if parts.scheme == "http" and parts.hostname not in ("localhost", "127.0.0.1", "::1"):
+            raise Fail("Plain http:// is only allowed for localhost; use https://")
         self.server = server.rstrip("/")
         self.scheme, self.netloc = parts.scheme, parts.netloc
         self.origin = f"{parts.scheme}://{parts.netloc}"
