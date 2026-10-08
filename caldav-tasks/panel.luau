@@ -14,6 +14,10 @@ local tagQuery = ""     -- current text in the tag filter input
 local tagSeed = 0       -- bumped to re-create (clear) the tag input
 local dueSeed = 0       -- bumped to re-create the due-date input
 local dueDraft = nil    -- {href, text}: due-date text typed but not yet submitted
+local RECENT_SECONDS = 30 -- how long a completed task stays visible (struck through)
+local recent = {}         -- href -> { task = <task>, at = <os.time() when completed> }
+local doneRows = {}       -- recently completed tasks, oldest first
+
 
 local render -- forward declaration
 
@@ -148,6 +152,11 @@ local function setDone(ics)
 	})
 end
 
+-- Undo of setDone: back to an open task.
+local function setReopen(ics)
+	return edit(ics, { "STATUS", "PERCENT-COMPLETION", "COMPLETED" }, { "STATUS:NEEDS-ACTION" })
+end
+
 -- Replace the task's categories (all CATEGORIES lines) with `tags`.
 local function setCategories(ics, tags)
 	local add = {}
@@ -184,13 +193,48 @@ end
 
 -- ===== end of iCalendar helpers =====
 
+-- Tick every second only while completed tasks are waiting to expire.
+local function updateTicks()
+	pcall(panel.setWantsSecondTicks, next(recent) ~= nil)
+end
+
+-- Forget completed tasks whose time is up. Returns true if any was removed.
+local function pruneRecent()
+	local now = os.time()
+	local removed = false
+	for href, info in pairs(recent) do
+		if now - info.at >= RECENT_SECONDS then
+			recent[href] = nil
+			removed = true
+		end
+	end
+	return removed
+end
+
 local function rebuildVisible()
+	pruneRecent()
 	visible = {}
+	doneRows = {}
+	local byHref = {}
 	for _, t in ipairs(tasks) do
-		if not t.done then
+		byHref[t.href] = t
+		if not t.done and not recent[t.href] then
 			visible[#visible + 1] = t
 		end
 	end
+	local entries = {}
+	for href, info in pairs(recent) do
+		entries[#entries + 1] = { task = byHref[href] or info.task, at = info.at }
+	end
+	table.sort(entries, function(a, b)
+		if a.at ~= b.at then return a.at < b.at end
+		return tostring(a.task.href) < tostring(b.task.href)
+	end)
+	for _, e in ipairs(entries) do
+		e.task.done = true
+		doneRows[#doneRows + 1] = e.task
+	end
+	updateTicks()
 end
 
 local function taskHasTag(t, tag)
@@ -221,13 +265,11 @@ end
 -- made elsewhere in between is rejected (HTTP 412) instead of overwritten.
 -- The service does not know the new ETag after our own write, so it is
 -- dropped until the next sync supplies it.
-local function updateTask(t, label, transform)
-	if t.creating then
-		noctalia.notify(APP, label .. ": the task is still being created — try again in a moment")
-		requestRefresh()
-		return
-	end
+local function updateTask(t, label, transform, onFail)
 	local u, p = auth()
+	local function failed()
+		if onFail then onFail() end
+	end
 	noctalia.http({
 		url = t.href,
 		method = "GET",
@@ -238,17 +280,20 @@ local function updateTask(t, label, transform)
 			local status = resp and resp.status
 			if status == 404 then
 				noctalia.notify(APP, label .. ": this task no longer exists on the server")
+				failed()
 				requestRefresh()
 				return
 			end
 			if not (resp and resp.ok and status == 200) then
 				noctalia.notify(APP, label .. ": could not read the task (HTTP " .. tostring(status) .. ")")
+				failed()
 				requestRefresh()
 				return
 			end
 			local ics = resp.body or ""
 			if not ics:find("BEGIN:VTODO", 1, true) then
 				noctalia.notify(APP, label .. ": the server did not return a task")
+				failed()
 				requestRefresh()
 				return
 			end
@@ -269,14 +314,17 @@ local function updateTask(t, label, transform)
 					t.etag = nil
 				elseif s == 412 then
 					noctalia.notify(APP, label .. ": the task was changed elsewhere — refreshed, please try again")
+					failed()
 				else
 					noctalia.notify(APP, label .. " failed: HTTP " .. tostring(s))
+					failed()
 				end
 				requestRefresh()
 			end)
 		end)
 		if not ok then
 			report(label, err)
+			failed()
 			requestRefresh()
 		end
 	end)
@@ -313,17 +361,34 @@ local function removeTagFrom(t, tag)
 	saveTaskTags(t, new)
 end
 
--- Complete a task.
+-- Complete a task: it moves to the end of the list, struck through, until its time is up.
 local function completeTask(t)
 	if not t or t.done then return end
 
 	t.done = true
+	recent[t.href] = { task = t, at = os.time() }
 	editingTask = nil
 	tagQuery = ""
 	rebuildVisible()
 	render()
 
-	updateTask(t, "Complete", setDone)
+	updateTask(t, "Complete", setDone, function()
+		-- the write failed: it is not completed after all
+		recent[t.href] = nil
+		t.done = false
+		rebuildVisible()
+		render()
+	end)
+end
+
+-- Reopen a task that was completed a moment ago.
+local function undoComplete(t)
+	if not recent[t.href] then return end
+	recent[t.href] = nil
+	t.done = false
+	rebuildVisible()
+	render()
+	updateTask(t, "Undo", setReopen)
 end
 
 -- Add a task: show it at once, PUT a new VTODO to a UID-derived URL, and let
@@ -581,6 +646,23 @@ local function taskRow(task)
 	}, children)
 end
 
+
+-- A recently completed task: dimmed, with an undo arrow instead of the circle.
+local function doneRow(task)
+	return ui.row({
+		key = "done-" .. tostring(task.href or task.summary),
+		gap = 8,
+		align = "center",se
+		opacity = 0.45,
+	}, {
+		ui.button({
+			glyph = "arrow-back-up", variant = "ghost", tooltip = "Undo",
+			onClick = function() undoComplete(task) end,
+		}),
+		ui.label({ text = tostring(task.summary), maxLines = 1, flexGrow = 1 }),
+	})
+end
+
 function onRefreshClicked() requestRefresh() end
 
 function onAddSubmit(value)
@@ -624,6 +706,11 @@ render = function()
 		end
 	end
 
+	-- recently completed tasks: at the end, until their time is up
+	for _, t in ipairs(doneRows) do
+		rows[#rows + 1] = doneRow(t)
+	end
+
 	panel.render(ui.column({ gap = 8, padding = 12, height = ROOT_HEIGHT }, {
 		header,
 		input,
@@ -634,10 +721,22 @@ end
 
 function onOpen(_context)
 	local ok, err = pcall(function()
+		rebuildVisible() -- also drops expired entries and restarts the ticks if needed
 		render()
 	end)
 	if not ok then report("onOpen-render", err) end
 	requestRefresh()
+end
+
+-- Called every second while completed tasks are waiting to expire.
+function update()
+	if pruneRecent() then
+		rebuildVisible()
+		render()
+	end
+	if next(recent) == nil then
+		pcall(panel.setWantsSecondTicks, false)
+	end
 end
 
 noctalia.state.watch("tasks", function(value)
