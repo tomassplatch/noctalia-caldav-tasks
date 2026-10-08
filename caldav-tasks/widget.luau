@@ -21,7 +21,7 @@ local function render()
 end
 
 function update()
-	noctalia.setUpdateInterval(60000)
+	noctalia.setUpdateInterval(600000)
 	render()
 end
 
