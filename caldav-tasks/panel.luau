@@ -226,6 +226,11 @@ end
 -- The service does not know the new ETag after our own write, so it is
 -- dropped until the next sync supplies it.
 local function updateTask(t, label, transform)
+	if t.creating then
+		noctalia.notify(APP, label .. ": the task is still being created — try again in a moment")
+		requestRefresh()
+		return
+	end
 	local u, p = auth()
 	noctalia.http({
 		url = t.href,
@@ -325,7 +330,8 @@ local function completeTask(t)
 	updateTask(t, "Complete", setDone)
 end
 
--- Add a task: PUT a new VTODO to a UID-derived URL.
+-- Add a task: show it at once, PUT a new VTODO to a UID-derived URL, and let
+-- the next sync replace the temporary entry with the server's copy.
 local function addTask(value)
 	local text = ((value or ""):match("^%s*(.-)%s*$"))
 	if text == "" then return end
@@ -343,6 +349,19 @@ local function addTask(value)
 		.. "SUMMARY:" .. escapeText(text) .. "\r\nSTATUS:NEEDS-ACTION\r\n"
 		.. "END:VTODO\r\nEND:VCALENDAR\r\n"
 	local href = calUrl .. uid .. ".ics"
+
+	-- Temporary entry, shown at the top. `creating` blocks edits until the PUT
+	-- has finished. A new list is built so the shared one is not modified.
+	local newTask = {
+		href = href, etag = nil, summary = text,
+		done = false, tags = {}, due = nil, creating = true,
+	}
+	local updated = { newTask }
+	for _, x in ipairs(tasks) do updated[#updated + 1] = x end
+	tasks = updated
+	rebuildVisible()
+	render()
+
 	noctalia.http({
 		url = href,
 		method = "PUT",
@@ -352,8 +371,17 @@ local function addTask(value)
 		basic_username = u,
 		basic_password = p,
 	}, function(resp)
+		newTask.creating = false
 		if not (resp and resp.ok and (resp.status == 200 or resp.status == 201 or resp.status == 204)) then
 			noctalia.notify(APP, "Add failed: HTTP " .. tostring(resp and resp.status))
+			-- take the temporary entry back out
+			local kept = {}
+			for _, x in ipairs(tasks) do
+				if x ~= newTask then kept[#kept + 1] = x end
+			end
+			tasks = kept
+			rebuildVisible()
+			render()
 		end
 		requestRefresh()
 	end)
