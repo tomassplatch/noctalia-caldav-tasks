@@ -5,8 +5,6 @@ local tasks = {}   -- all tasks from the service
 local visible = {} -- open (not completed) tasks shown in the panel
 local dav = nil
 local MAX_ROWS = 200
-local PAGE_SIZE = 9
-local USE_SCROLL = true
 local PANEL_HEIGHT = 560
 local ROOT_HEIGHT = PANEL_HEIGHT - 16
 local page = 1
@@ -586,8 +584,6 @@ local function taskRow(task)
 end
 
 function onRefreshClicked() requestRefresh() end
-function onPrevPage() page = page - 1; render() end
-function onNextPage() page = page + 1; render() end
 
 function onAddSubmit(value)
 	addTask(value)
@@ -597,9 +593,6 @@ end
 
 render = function()
 	local shown = math.min(#visible, MAX_ROWS)
-	local pages = math.max(1, math.ceil(shown / PAGE_SIZE))
-	if page > pages then page = pages end
-	if page < 1 then page = 1 end
 
 	local header = ui.row({ gap = 8, align = "center" }, {
 		ui.label({ text = "Tasks", fontSize = 16, fontWeight = "bold", color = "primary", flexGrow = 1 }),
@@ -618,12 +611,7 @@ render = function()
 			ui.label({ text = "All done!", color = "on_surface/0.6" }),
 		})
 	else
-		local first, last = 1, shown
-		if not USE_SCROLL then
-			first = (page - 1) * PAGE_SIZE + 1
-			last = math.min(first + PAGE_SIZE - 1, shown)
-		end
-		for i = first, last do
+		for i = 1, shown do
 			local t = visible[i]
 			rows[#rows + 1] = taskRow(t)
 			if editingTask == t then
@@ -638,18 +626,12 @@ render = function()
 		end
 	end
 
-	if USE_SCROLL then
-		panel.render(ui.column({ gap = 8, padding = 12, height = ROOT_HEIGHT }, {
-			header,
-			input,
-			ui.separator({}),
-			ui.scroll({ gap = 4, flexGrow = 1 }, rows),
-		}))
-	else
-		local children = { header, input, ui.separator({}) }
-		for _, row in ipairs(rows) do children[#children + 1] = row end
-		panel.render(ui.column({ gap = 8, padding = 12, height = ROOT_HEIGHT }, children))
-	end
+	panel.render(ui.column({ gap = 8, padding = 12, height = ROOT_HEIGHT }, {
+		header,
+		input,
+		ui.separator({}),
+		ui.scroll({ gap = 4, flexGrow = 1 }, rows),
+	}))
 end
 
 function onOpen(_context)
