@@ -1,7 +1,7 @@
 id = "tomassplatch/caldav-tasks"
 name = "CalDAV Tasks Sync"
 version = "0.2.0"
-plugin_api = 14
+plugin_api = 18
 author = "tomassplatch"
 license = "MIT"
 description = "To-do list synced with a CalDAV task calendar (tested with Nextcloud Tasks)."
