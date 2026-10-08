@@ -355,7 +355,7 @@ def fetch_tasks(client, cal_url):
             "tags": tags,
             "due": due,
         })
-    tasks.sort(key=lambda t: (t["done"], t["summary"].lower()))
+        tasks.sort(key=lambda t: (t["done"], not t["due"], (t["due"] or "")[:8], t["summary"].lower()))
     return tasks
 
 
