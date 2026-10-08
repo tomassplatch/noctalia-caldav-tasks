@@ -41,6 +41,8 @@ default = ""
 key = "interval"
 type = "int"
 label_key = "settings.interval.label"
+min = 30
+max = 600
 default = 120
 
 [[service]]
