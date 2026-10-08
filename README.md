@@ -49,4 +49,4 @@ credentials are only sent to the configured server, and never over a downgrade f
 - Recurring tasks are shown but not specially handled.
 
 ## Disclaimer
-- App is completely vibe-coded.
+- This plugin is completely vibe-coded for my own needs. No guarantees.
