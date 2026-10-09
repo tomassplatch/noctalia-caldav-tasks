@@ -5,9 +5,8 @@ local tasks = {}   -- all tasks from the service
 local visible = {} -- open (not completed) tasks shown in the panel
 local dav = nil
 local MAX_ROWS = 200
-local PANEL_HEIGHT = 560
+local PANEL_HEIGHT = 560 -- keep in sync with the [[panel]] height in plugin.toml
 local ROOT_HEIGHT = PANEL_HEIGHT - 16
-local page = 1
 local inputSeed = 0
 local editingTask = nil -- the task whose editor is expanded
 local tagQuery = ""     -- current text in the tag filter input
@@ -27,11 +26,26 @@ local function requestRefresh()
 end
 
 local function report(where, err)
-	noctalia.notify(APP, "[" .. where .. "] " .. tostring(err))
+	local msg = "[" .. where .. "] " .. tostring(err)
+	noctalia.log(msg)
+	noctalia.notifyError(APP, msg)
 end
 
 local function auth()
 	return noctalia.getConfig("username") or "", noctalia.getConfig("password") or ""
+end
+
+-- Credentials are only ever sent to the configured server (fetch_tasks.py
+-- enforces the same rule for its own requests).
+local function originOf(url)
+	local scheme, host = tostring(url or ""):match("^(%a[%w+.-]*)://([^/]+)")
+	if not scheme then return nil end
+	return scheme:lower() .. "://" .. host:lower()
+end
+
+local function isConfiguredServer(url)
+	local want = originOf(noctalia.getConfig("server"))
+	return want ~= nil and originOf(url) == want
 end
 
 -- ===== iCalendar helpers (plain string work, no host API) =====
@@ -277,6 +291,11 @@ local function updateTask(t, label, transform, onFail)
 		requestRefresh()
 		return
 	end
+	if not isConfiguredServer(t.href) then
+		noctalia.notify(APP, label .. ": refusing to send credentials to a different server")
+		if onFail then onFail() end
+		return
+	end
 	local u, p = auth()
 	local function failed()
 		if onFail then onFail() end
@@ -387,7 +406,7 @@ local function removeTagFrom(t, tag)
 	saveTaskTags(t, new)
 end
 
--- Complete a task: it moves to the end of the list, struck through, until its time is up.
+-- Complete a task: it moves to the end of the list, dimmed, until its time is up.
 local function completeTask(t)
 	if not t or t.done then return end
 
@@ -425,6 +444,10 @@ local function addTask(value)
 	local calUrl = dav and dav.calUrl
 	if not calUrl then
 		noctalia.notify(APP, "Calendar URL not known yet — try again in a moment")
+		return
+	end
+	if not isConfiguredServer(calUrl) then
+		noctalia.notify(APP, "Calendar URL is on a different server — not sending credentials")
 		return
 	end
 	local u, p = auth()
@@ -508,13 +531,21 @@ local function dueInfo(raw)
 	return text, (num < todayNum)
 end
 
+-- A real calendar date (the old range checks accepted 2026-02-31).
+local function isRealDate(y, m, d)
+	if m < 1 or m > 12 or d < 1 then return false end
+	local days = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
+	if (y % 4 == 0 and y % 100 ~= 0) or y % 400 == 0 then days[2] = 29 end
+	return d <= days[m]
+end
+
 -- Parse a due-date text. Returns ok, dateStr (dateStr nil means "clear the date").
 -- Tells the user and returns false if the format is wrong.
 local function parseDue(text)
 	local s = ((text or ""):match("^%s*(.-)%s*$"))
 	if s == "" then return true, nil end
 	local y, m, d = s:match("^(%d%d%d%d)-(%d%d)-(%d%d)$")
-	if y and tonumber(m) >= 1 and tonumber(m) <= 12 and tonumber(d) >= 1 and tonumber(d) <= 31 then
+	if y and isRealDate(tonumber(y), tonumber(m), tonumber(d)) then
 		return true, s
 	end
 	noctalia.notify(APP, "Format: YYYY-MM-DD (e.g. 2026-10-31)")
@@ -633,10 +664,12 @@ local function tagEditor(t)
 				dueDraft = { href = t.href, text = tostring(text or "") }
 			end,
 			onSubmit = function(val)
-				commitDue(t, val)
-				dueDraft = nil
-				dueSeed = dueSeed + 1
-				render()
+				-- on a format error keep what was typed, so it can be corrected
+				if commitDue(t, val) then
+					dueDraft = nil
+					dueSeed = dueSeed + 1
+					render()
+				end
 			end,
 		}),
 	})
