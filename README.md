@@ -1,4 +1,4 @@
-# CalDAV Tasks Sync — a Noctalia plugin
+# CalDAV Tasks Sync - Noctalia plugin
 
 A to-do panel and bar widget for [Noctalia](https://noctalia.dev) v5 that syncs with a
 CalDAV task calendar. Tested with **Nextcloud Tasks**.
