@@ -13,11 +13,18 @@ local function notify(msg)
 	noctalia.notify(APP, msg)
 end
 
-local function publishStatus(s)
+-- kind: "ok" | "syncing" | "error" (the default). The bar widget reads
+-- "statusKind" instead of guessing from the wording of the message.
+local function publishStatus(s, kind)
 	s = s or "(no status)"
-	-- anything that is not a normal progress message also goes to Noctalia's log
-	if not (s:find("^Synced") or s:find("^Syncing")) then log(s) end
+	kind = kind or "error"
+	if kind == "error" then log(s) end
+	noctalia.state.set("statusKind", kind)
 	noctalia.state.set("status", s)
+end
+
+local function publishSynced(open, total)
+	publishStatus(("Synced %s — %d open (%d total)"):format(os.date("%H:%M:%S"), open, total), "ok")
 end
 
 local function logFile(name, content)
@@ -40,8 +47,9 @@ local function scriptPath()
 	return dir .. "fetch_tasks.py"
 end
 
+-- The lower bound matches `min` of the "interval" setting in plugin.toml.
 local function syncInterval()
-	return math.max(15, tonumber(noctalia.getConfig("interval")) or 120)
+	return math.max(30, tonumber(noctalia.getConfig("interval")) or 120)
 end
 
 -- Noctalia's own offline mode (needs plugin_api = 26; otherwise: not offline).
@@ -123,7 +131,7 @@ local function loadCache()
 	lastCacheJson = raw
 	noctalia.state.set("dav", { server = server, calUrl = data.url })
 	noctalia.state.set("tasks", data.tasks)
-	publishStatus("Syncing... (showing cached tasks)")
+	publishStatus("Syncing... (showing cached tasks)", "syncing")
 end
 
 -- ===== cheap change check without starting Python =====
@@ -131,6 +139,16 @@ end
 local PROPFIND_CTAG = '<?xml version="1.0"?>'
 	.. '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:prop>'
 	.. "<cs:getctag/><d:sync-token/></d:prop></d:propfind>"
+
+-- First non-empty ctag, else sync-token, in a PROPFIND answer. An empty
+-- (self-closing) element is skipped, so it cannot hide the other marker.
+local function extractMarker(body)
+	for _, name in ipairs({ "getctag", "sync%-token" }) do
+		local v = body:match(name .. "[^>]*>%s*([^<]-)%s*<")
+		if v and v ~= "" then return v end
+	end
+	return nil
+end
 
 -- cb(ctag): the calendar's change marker, or nil when it could not be read
 -- (then the caller simply falls back to fetch_tasks.py).
@@ -145,9 +163,7 @@ local function quickCtag(calUrl, user, pass, cb)
 	}, function(resp)
 		local ctag = nil
 		if resp and (resp.ok or resp.status == 207) and type(resp.body) == "string" then
-			ctag = resp.body:match("getctag[^>]*>%s*([^<]-)%s*<")
-				or resp.body:match("sync%-token[^>]*>%s*([^<]-)%s*<")
-			if ctag == "" then ctag = nil end
+			ctag = extractMarker(resp.body)
 		end
 		cb(ctag)
 	end)
@@ -205,7 +221,7 @@ runFetch = function(force)
 	local ctagArg = ""
 	if not force and known.key == key and known.ctag then ctagArg = known.ctag end
 
-	if force then publishStatus("Syncing...") end
+	if force then publishStatus("Syncing...", "syncing") end
 	syncing = true
 	syncStarted = os.time()
 	pending = false
@@ -245,6 +261,10 @@ runFetch = function(force)
 						return
 					end
 
+					if data.skipped then
+						log(("%d task(s) ignored: URL outside the configured server"):format(data.skipped))
+					end
+
 					local ctag = nil
 					if type(data.ctag) == "string" and data.ctag ~= "" then ctag = data.ctag end
 
@@ -253,8 +273,7 @@ runFetch = function(force)
 						known.key = key
 						known.url = data.url
 						known.ctag = ctag
-						publishStatus(("Synced %s — %d open (%d total)")
-							:format(os.date("%H:%M:%S"), known.open, known.total))
+						publishSynced(known.open, known.total)
 						good = true
 						return
 					end
@@ -271,8 +290,7 @@ runFetch = function(force)
 					known.open = open
 					known.total = #tasks
 					noctalia.state.set("dav", { server = server, calUrl = data.url })
-					publishStatus(("Synced %s — %d open (%d total)")
-						:format(os.date("%H:%M:%S"), open, #tasks))
+					publishSynced(open, #tasks)
 					noctalia.state.set("tasks", tasks)
 					saveCache(key, data.url, ctag, tasks)
 					good = true
@@ -289,18 +307,17 @@ runFetch = function(force)
 			end)
 
 		if not launched then
-			syncing = false
 			publishStatus("Could not launch fetch_tasks.py — is python3 installed?")
+			noteFailure()
+			finishSync()
 		end
 	end
 
 	if ctagArg ~= "" and known.url then
 		-- Timer tick on a known calendar: ask the server first, without Python.
 		quickCtag(known.url, user, pass, function(ctag)
-			log("quick ctag check: " .. tostring(ctag) .. " (known: " .. tostring(known.ctag) .. ")")
 			if ctag ~= nil and ctag == known.ctag then
-				publishStatus(("Synced %s — %d open (%d total)")
-					:format(os.date("%H:%M:%S"), known.open, known.total))
+				publishSynced(known.open, known.total)
 				noteSuccess()
 				finishSync()
 			else
