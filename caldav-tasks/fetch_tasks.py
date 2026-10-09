@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fetch VTODOs from a CalDAV server and print them as JSON.
 
-Usage: fetch_tasks.py SERVER_URL USERNAME PASSWORD CALENDAR_NAME [CALENDAR_URL]
+Usage: fetch_tasks.py SERVER_URL USERNAME PASSWORD CALENDAR_NAME [CALENDAR_URL [PREV_CTAG]]
 
 The calendar is located in this order:
   1. CALENDAR_URL, if given (absolute, or relative to SERVER_URL);
@@ -9,9 +9,16 @@ The calendar is located in this order:
   3. standard CalDAV discovery (RFC 4791 / RFC 6764): current-user-principal
      -> calendar-home-set -> the calendars that support VTODO.
 
+PREV_CTAG is the "ctag" of the previous successful run ("" for none).
+
 Output (always exits 0):
-  {"ok": true, "url": "<calendar url>", "tasks": [...]}
+  {"ok": true, "url": "<calendar url>", "ctag": "<marker>", "tasks": [...]}
+  {"ok": true, "url": "<calendar url>", "ctag": "<marker>", "unchanged": true}
+      (PREV_CTAG equals the current marker: no tasks are sent)
   {"ok": false, "message": "..."}
+"ctag" is left out when the server offers neither a ctag nor a sync-token.
+"skipped" (number) is added when tasks were dropped because their URL is not on
+the configured server (see Client.same_origin).
 """
 import base64
 import json
@@ -90,6 +97,11 @@ class Client:
         p = urllib.parse.urlsplit(url)
         if p.netloc != self.netloc or (self.scheme == "https" and p.scheme != "https"):
             raise Fail(f"Refusing to send credentials to {p.scheme}://{p.netloc}")
+
+    def same_origin(self, url):
+        """True if `url` is on the configured server (scheme and host)."""
+        p = urllib.parse.urlsplit(url)
+        return p.scheme == self.scheme and p.netloc == self.netloc
 
     def request(self, method, url, body=None, depth=None):
         """Return (text, final_url). urllib does not follow redirects for
@@ -299,6 +311,7 @@ def parse_vtodo(ics):
             props.setdefault(m.group(1).upper(), []).append(line.split(":", 1)[1])
     return props
 
+
 def get_ctag(client, cal_url):
     """Cheap change marker for the calendar (ctag, else sync-token), or None.
     Any problem returns None, which just means 'do the full fetch'."""
@@ -315,16 +328,23 @@ def get_ctag(client, cal_url):
                     return value.strip()
     return None
 
+
 def fetch_tasks(client, cal_url):
     try:
         text, final = client.request("REPORT", cal_url, REPORT_TODOS, depth="1")
     except urllib.error.HTTPError as e:
         raise Fail(f"REPORT failed: HTTP {e.code}")
     root = parse_xml(text)
-    tasks = []
+    tasks, skipped = [], 0
     for resp in root.iter(DAV + "response"):
         href = (resp.findtext(DAV + "href") or "").strip()
         if not href:
+            continue
+        full = urllib.parse.urljoin(final, href)
+        if not client.same_origin(full):
+            # The panel sends the credentials to every task URL it is given,
+            # so never hand out one that points somewhere else.
+            skipped += 1
             continue
         data, etag = None, None
         for prop in ok_props(resp):
@@ -348,15 +368,15 @@ def fetch_tasks(client, cal_url):
                     tags.append(part)
         due = (first("DUE") or "").strip() or None
         tasks.append({
-            "href": urllib.parse.urljoin(final, href),
+            "href": full,
             "etag": etag,
             "summary": summary or "(no summary)",
             "done": status in ("COMPLETED", "CANCELLED"),
             "tags": tags,
             "due": due,
         })
-        tasks.sort(key=lambda t: (t["done"], not t["due"], (t["due"] or "")[:8], t["summary"].lower()))
-    return tasks
+    tasks.sort(key=lambda t: (t["done"], not t["due"], (t["due"] or "")[:8], t["summary"].lower()))
+    return tasks, skipped
 
 
 def main():
@@ -381,7 +401,7 @@ def main():
         if ctag and ctag == previous:
             print(json.dumps({"ok": True, "url": cal_url, "ctag": ctag, "unchanged": True}))
             return
-        tasks = fetch_tasks(client, cal_url)
+        tasks, skipped = fetch_tasks(client, cal_url)
     except Fail as e:
         die(str(e))
     except urllib.error.HTTPError as e:
@@ -391,6 +411,8 @@ def main():
     out = {"ok": True, "url": cal_url, "tasks": tasks}
     if ctag:
         out["ctag"] = ctag
+    if skipped:
+        out["skipped"] = skipped
     print(json.dumps(out))
 
 
