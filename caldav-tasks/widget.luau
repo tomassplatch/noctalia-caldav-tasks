@@ -1,5 +1,5 @@
 --!nonstrict
-local PLUGIN = "tomassplatch/caldav-tasks"
+local PLUGIN = "tomassplatch/caldav-tasks" -- must match `id` in plugin.toml
 
 local function openCount()
 	local n = 0
@@ -13,14 +13,14 @@ end
 local function render()
 	barWidget.setGlyph("check")
 	local status = noctalia.state.get("status")
-	if status then
-		local s = tostring(status)
-		local failing = not (s:find("^Synced") or s:find("^Syncing"))
-		barWidget.setText(tostring(openCount()) .. (failing and " !" or ""))
-		barWidget.setTooltip(s .. "\nClick to open the list")
-	else
+	if not status then
 		barWidget.setText("…")
+		return
 	end
+	-- "statusKind" is published by service.luau: "ok" | "syncing" | "error"
+	local failing = noctalia.state.get("statusKind") == "error"
+	barWidget.setText(tostring(openCount()) .. (failing and " !" or ""))
+	barWidget.setTooltip(tostring(status) .. "\nClick to open the list")
 end
 
 function update()
