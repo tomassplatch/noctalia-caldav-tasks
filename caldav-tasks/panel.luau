@@ -7,6 +7,7 @@ local dav = nil
 local MAX_ROWS = 200
 local PANEL_HEIGHT = 560 -- keep in sync with the [[panel]] height in plugin.toml
 local ROOT_HEIGHT = PANEL_HEIGHT - 16
+local CHIPS_PER_ROW = 5 -- quick-date chips per line; lower it if they are clipped
 local inputSeed = 0
 local editingTask = nil -- the task whose editor is expanded
 local tagQuery = ""     -- current text in the tag filter input
@@ -436,11 +437,183 @@ local function undoComplete(t)
 	updateTask(t, "Undo", setReopen)
 end
 
+-- [dates:begin]
+-- Dates. A day number (days since 1970-01-01) turns date arithmetic into plain
+-- integer maths. Only todayNum() reads the clock, so everything else can be
+-- tested with a fixed "today".
+
+local function monthLength(y, m)
+	local days = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
+	if m == 2 and ((y % 4 == 0 and y % 100 ~= 0) or y % 400 == 0) then return 29 end
+	return days[m]
+end
+
+-- A real calendar date (the old range checks accepted 2026-02-31).
+local function isRealDate(y, m, d)
+	if m < 1 or m > 12 or d < 1 then return false end
+	return d <= monthLength(y, m)
+end
+
+local function daysFromCivil(y, m, d)
+	if m <= 2 then y = y - 1 end
+	local era = math.floor(y / 400)
+	local yoe = y - era * 400
+	local mp = (m > 2) and (m - 3) or (m + 9)
+	local doy = math.floor((153 * mp + 2) / 5) + d - 1
+	local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+	return era * 146097 + doe - 719468
+end
+
+local function civilFromDays(z)
+	z = z + 719468
+	local era = math.floor(z / 146097)
+	local doe = z - era * 146097
+	local yoe = math.floor((doe - math.floor(doe / 1460) + math.floor(doe / 36524)
+		- math.floor(doe / 146096)) / 365)
+	local y = yoe + era * 400
+	local doy = doe - (365 * yoe + math.floor(yoe / 4) - math.floor(yoe / 100))
+	local mp = math.floor((5 * doy + 2) / 153)
+	local d = doy - math.floor((153 * mp + 2) / 5) + 1
+	local m = (mp < 10) and (mp + 3) or (mp - 9)
+	if m <= 2 then y = y + 1 end
+	return y, m, d
+end
+
+local function ymdOf(n)
+	local y, m, d = civilFromDays(n)
+	return ("%04d-%02d-%02d"):format(y, m, d)
+end
+
+local function todayNum()
+	local t = os.date("*t")
+	return daysFromCivil(t.year, t.month, t.day)
+end
+
+-- Monday = 0 … Sunday = 6
+local function weekdayOf(n) return (n + 3) % 7 end
+
+-- The Friday that ends the current working week. On Saturday and Sunday the
+-- current week is the one that starts on Monday.
+local function endOfWeek(n)
+	local wd = weekdayOf(n)
+	return n + (wd <= 4 and (4 - wd) or (11 - wd))
+end
+
+local function endOfMonth(n)
+	local y, m = civilFromDays(n)
+	return daysFromCivil(y, m, monthLength(y, m))
+end
+
+-- Quick-pick dates for the editor. A chip whose date is the same as an earlier
+-- one is left out (on a Thursday, "This week" would just repeat "Tomorrow").
+local function dueChips(today)
+	local candidates = {
+		{ "Today", today },
+		{ "Tomorrow", today + 1 },
+		{ "This week", endOfWeek(today) },
+		{ "Next week", endOfWeek(today) + 7 },
+		{ "Month", endOfMonth(today) },
+	}
+	local out, used = {}, {}
+	for _, c in ipairs(candidates) do
+		if not used[c[2]] then
+			used[c[2]] = true
+			out[#out + 1] = { label = c[1], ymd = ymdOf(c[2]) }
+		end
+	end
+	return out
+end
+
+local WEEKDAYS = {
+	mon = 0, monday = 0, tue = 1, tues = 1, tuesday = 1, wed = 2, weds = 2, wednesday = 2,
+	thu = 3, thur = 3, thurs = 3, thursday = 3, fri = 4, friday = 4,
+	sat = 5, saturday = 5, sun = 6, sunday = 6,
+}
+
+-- Read a due-date text. Returns ok, "YYYY-MM-DD" (nil date with ok = clear the date).
+-- Accepted: 2026-10-31 · today, tomorrow · mon … sun (the next one) · +3, 3d, 2w ·
+-- 31.10, 31/10 (day first, the next time that date comes round) · 31.10.2026, 31.10.26
+local function parseDueText(text, today)
+	local s = (text or ""):lower():match("^%s*(.-)%s*$")
+	if s == "" then return true, nil end
+
+	local y, m, d = s:match("^(%d%d%d%d)%-(%d%d?)%-(%d%d?)$")
+	if y then
+		if isRealDate(tonumber(y), tonumber(m), tonumber(d)) then
+			return true, ymdOf(daysFromCivil(tonumber(y), tonumber(m), tonumber(d)))
+		end
+		return false, nil
+	end
+
+	if s == "today" then return true, ymdOf(today) end
+	if s == "tomorrow" or s == "tom" then return true, ymdOf(today + 1) end
+
+	local wd = WEEKDAYS[s]
+	if wd then
+		local delta = (wd - weekdayOf(today)) % 7
+		if delta == 0 then delta = 7 end
+		return true, ymdOf(today + delta)
+	end
+
+	local n, unit = s:match("^%+(%d+)([dw]?)$")
+	if not n then n, unit = s:match("^(%d+)([dw])$") end
+	if n then
+		n = tonumber(n) * (unit == "w" and 7 or 1)
+		if n > 3650 then return false, nil end
+		return true, ymdOf(today + n)
+	end
+
+	s = s:gsub("[./%-]+$", "") -- "10.11." -> "10.11"
+	local a, b, c = s:match("^(%d+)[./%-](%d+)[./%-](%d+)$")
+	if a then
+		local yy, mm, dd
+		if #a == 4 then
+			yy, mm, dd = a, b, c
+		else
+			dd, mm, yy = a, b, c
+			if #yy == 2 then yy = "20" .. yy end
+		end
+		if #yy == 4 and #mm <= 2 and #dd <= 2
+			and isRealDate(tonumber(yy), tonumber(mm), tonumber(dd)) then
+			return true, ymdOf(daysFromCivil(tonumber(yy), tonumber(mm), tonumber(dd)))
+		end
+		return false, nil
+	end
+
+	a, b = s:match("^(%d+)[./%-](%d+)$")
+	if a and #a <= 2 and #b <= 2 then
+		local dd, mm = tonumber(a), tonumber(b)
+		local thisYear = civilFromDays(today)
+		for yy = thisYear, thisYear + 8 do -- 29.2 may be a few years away
+			if isRealDate(yy, mm, dd) then
+				local n2 = daysFromCivil(yy, mm, dd)
+				if n2 >= today then return true, ymdOf(n2) end
+			end
+		end
+	end
+	return false, nil
+end
+
+-- "Pay invoice !fri" -> "Pay invoice", "2026-10-16". Only a last word that starts
+-- with "!" and reads as a date is taken; anything else stays part of the title.
+local function splitDueSuffix(text, today)
+	local title, token = text:match("^(.-)%s+!(%S+)$")
+	if title and title ~= "" then
+		local ok, ymd = parseDueText(token, today)
+		if ok and ymd then return title, ymd end
+	end
+	return text, nil
+end
+-- [dates:end]
+
 -- Add a task: show it at once, PUT a new VTODO to a UID-derived URL, and let
 -- the next sync replace the temporary entry with the server's copy.
 local function addTask(value)
 	local text = ((value or ""):match("^%s*(.-)%s*$"))
 	if text == "" then return end
+	local dueYmd
+	text, dueYmd = splitDueSuffix(text, todayNum())
+	local dueDigits = dueYmd and (dueYmd:gsub("-", "")) or nil
 	local calUrl = dav and dav.calUrl
 	if not calUrl then
 		noctalia.notify(APP, "Calendar URL not known yet — try again in a moment")
@@ -457,6 +630,7 @@ local function addTask(value)
 		.. "BEGIN:VTODO\r\nUID:" .. uid .. "\r\nCREATED:" .. stamp .. "\r\n"
 		.. "LAST-MODIFIED:" .. stamp .. "\r\nDTSTAMP:" .. stamp .. "\r\n"
 		.. "SUMMARY:" .. escapeText(text) .. "\r\nSTATUS:NEEDS-ACTION\r\n"
+		.. (dueDigits and ("DUE;VALUE=DATE:" .. dueDigits .. "\r\n") or "")
 		.. "END:VTODO\r\nEND:VCALENDAR\r\n"
 	local href = calUrl .. uid .. ".ics"
 
@@ -464,7 +638,7 @@ local function addTask(value)
 	-- has finished. A new list is built so the shared one is not modified.
 	local newTask = {
 		href = href, etag = nil, summary = text,
-		done = false, tags = {}, due = nil, creating = true,
+		done = false, tags = {}, due = dueDigits, creating = true,
 	}
 	local updated = { newTask }
 	for _, x in ipairs(tasks) do updated[#updated + 1] = x end
@@ -531,25 +705,13 @@ local function dueInfo(raw)
 	return text, (num < todayNum)
 end
 
--- A real calendar date (the old range checks accepted 2026-02-31).
-local function isRealDate(y, m, d)
-	if m < 1 or m > 12 or d < 1 then return false end
-	local days = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
-	if (y % 4 == 0 and y % 100 ~= 0) or y % 400 == 0 then days[2] = 29 end
-	return d <= days[m]
-end
-
--- Parse a due-date text. Returns ok, dateStr (dateStr nil means "clear the date").
--- Tells the user and returns false if the format is wrong.
+-- Read a due-date text; tells the user and returns false if it is not a date.
 local function parseDue(text)
-	local s = ((text or ""):match("^%s*(.-)%s*$"))
-	if s == "" then return true, nil end
-	local y, m, d = s:match("^(%d%d%d%d)-(%d%d)-(%d%d)$")
-	if y and isRealDate(tonumber(y), tonumber(m), tonumber(d)) then
-		return true, s
+	local ok, ymd = parseDueText(text, todayNum())
+	if not ok then
+		noctalia.notify(APP, "Not a date. Try 2026-10-31, 31.10, fri, +3 or 2w")
 	end
-	noctalia.notify(APP, "Format: YYYY-MM-DD (e.g. 2026-10-31)")
-	return false, nil
+	return ok, ymd
 end
 
 -- Validate and save a due-date text ("" clears the date).
@@ -657,7 +819,7 @@ local function tagEditor(t)
 		ui.glyph({ name = "calendar", size = 14, color = "on_surface/0.6" }),
 		ui.input({
 			key = "due-" .. tostring(t.href) .. "-" .. dueSeed, value = prefilled,
-			placeholder = "YYYY-MM-DD (empty clears)", controlSize = "sm",
+			placeholder = "e.g. 31.10, fri, +3, 2w (empty clears)", controlSize = "sm",
 			flexGrow = 1,
 			-- remember the text only; no render() here, so typing is not disturbed
 			onChange = function(text)
@@ -673,6 +835,21 @@ local function tagEditor(t)
 			end,
 		}),
 	})
+
+	-- Quick dates: click to set and save at once.
+	local picks = {}
+	for _, c in ipairs(dueChips(todayNum())) do
+		picks[#picks + 1] = tagChip(c.label, function()
+			dueDraft = nil
+			dueSeed = dueSeed + 1
+			saveTaskDue(t, c.ymd)
+		end)
+	end
+	for i = 1, #picks, CHIPS_PER_ROW do
+		local line = {}
+		for j = i, math.min(i + CHIPS_PER_ROW - 1, #picks) do line[#line + 1] = picks[j] end
+		children[#children + 1] = ui.row({ gap = 4, align = "center" }, line)
+	end
 
 	children[#children + 1] = ui.button({
 		text = "Done", variant = "ghost",
@@ -794,7 +971,7 @@ render = function()
 
 	local input = ui.input({
 		key = "newtask-" .. inputSeed, value = "", focus = true,
-		placeholder = "New task… (Enter to add)", onSubmit = "onAddSubmit",
+		placeholder = "New task… (Enter to add; !fri = due Friday)", onSubmit = "onAddSubmit",
 	})
 
 	local rows = {}
