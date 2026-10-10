@@ -11,7 +11,16 @@ CalDAV task calendar. Tested with **Nextcloud Tasks**.
 - Completed tasks stay at the end of the list for 30 seconds, dimmed, with an undo button.
 - Edit the title, tags and due date of a task in an inline editor (pencil icon).
 - Tags are stored as iCalendar `CATEGORIES`. The editor suggests tags already used in the calendar.
-- Due dates are date-only (`YYYY-MM-DD`). Overdue dates are highlighted.
+- Due dates are date-only. Overdue dates are highlighted. They can be set in three ways:
+  - quick-pick chips in the editor: *Today*, *Tomorrow*, *This week* (Friday), *Next week*
+    (the Friday after) and *Month* (last day of the month). A chip is left out when its date
+    would repeat an earlier one, for example *This week* on a Thursday. On Saturday and
+    Sunday, "this week" means the week that starts on Monday;
+  - typing a date in the editor: `2026-10-31`, `31.10`, `31/10` (day first; the next time that
+    date comes round), `31.10.2026`, `today`, `tomorrow`, a weekday (`fri` is the next Friday),
+    `+3` or `3d` (days from today), `2w` (weeks). An empty field clears the date;
+  - ending a new task's title with `!` and a date: `Pay invoice !fri`, `Call back !+3`.
+    If the last word does not read as a date, it stays in the title.
 - The bar widget shows the number of open tasks, with a `!` after it when the last sync failed.
   The tooltip shows the sync status.
 - Tasks are cached on disk and shown at startup, and while the server is unreachable.
@@ -44,7 +53,7 @@ Then enable **CalDAV Tasks Sync** and fill in the plugin settings.
 | Calendar URL | optional; if set, discovery is skipped and this exact calendar is used |
 | Sync interval | seconds between checks, 30–600 (default 120) |
 
-## Calendar discovery
+## How the calendar is found
 
 1. the *Calendar URL* setting, if filled in;
 2. Nextcloud's layout (`/remote.php/dav/calendars/<user>/`);
