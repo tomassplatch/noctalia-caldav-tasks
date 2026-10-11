@@ -51,9 +51,9 @@ Then enable **CalDAV Tasks Sync** and fill in the plugin settings.
 | App password | Nextcloud: Settings → Security → *Devices & sessions* |
 | Calendar name | the task list's name (default `personal`); matching is forgiving: case, spaces, partial |
 | Calendar URL | optional; if set, discovery is skipped and this exact calendar is used |
-| Sync interval | seconds between checks, 30–600 (default 120) |
+| Sync interval | seconds between checks, 30-600 (default 120) |
 
-## How the calendar is found
+## Clendar discovery
 
 1. the *Calendar URL* setting, if filled in;
 2. Nextcloud's layout (`/remote.php/dav/calendars/<user>/`);
